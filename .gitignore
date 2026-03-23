@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Databricks
+.databricks/
+*.dbx/
+
+# Secrets / env
+.env
+*.env.local
+secrets/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code internal
+.claude/
