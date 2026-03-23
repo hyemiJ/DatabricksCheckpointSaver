@@ -36,7 +36,7 @@ from databricks.sdk import WorkspaceClient
 
 w = WorkspaceClient()
 os.environ["DATABRICKS_HOST"] = w.config.host
-os.environ["DATABRICKS_TOKEN"] = "<your token>" # 변경 필요
+os.environ["DATABRICKS_TOKEN"] = w.config.token  # 노트북 인증 컨텍스트에서 자동 로드
 
 # COMMAND ----------
 
@@ -245,8 +245,8 @@ print(f"✓ 엔드포인트 생성 완료: {endpoint.state}")
 
 import requests
 
-ENDPOINT_URL = f"https://<your-host>/serving-endpoints/langgraph-agent-memory/invocations" # 변경 필요
-HEADERS = {"Authorization": f"Bearer <your-token>", "Content-Type": "application/json"} # 변경 필요
+ENDPOINT_URL = f"{w.config.host}/serving-endpoints/langgraph-agent-memory/invocations"
+HEADERS = {"Authorization": f"Bearer {w.config.token}", "Content-Type": "application/json"}
 
 
 def ask(thread_id: str, message: str) -> str:
