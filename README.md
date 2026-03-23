@@ -90,26 +90,21 @@ DatabricksCheckpointSaver/
 ### 노트북 / Job 환경 (`DatabricksCheckpointSaver`)
 
 ```bash
-%pip install langgraph langchain-openai langchain-core
+%pip install langgraph databricks-langchain
 ```
-
-| 패키지 | 버전 |
-|--------|------|
-| `langgraph` | `>= 0.2.0` |
-| `langchain-core` | `>= 0.2.0` |
-| `pyspark` | Databricks Runtime 내장 |
 
 ### Model Serving 환경 (`DatabricksSQLCheckpointSaver`)
 
 ```bash
-pip install langgraph langchain-openai databricks-sql-connector mlflow
+pip install langgraph databricks-langchain databricks-sql-connector mlflow
 ```
 
-| 패키지 | 버전 |
-|--------|------|
-| `langgraph` | `>= 0.2.0` |
-| `databricks-sql-connector` | `>= 3.0.0` |
-| `mlflow` | `>= 2.0.0` |
+| 패키지 | 버전 | 용도 |
+|--------|------|------|
+| `langgraph` | `>= 0.2.0` | 그래프/에이전트 실행 |
+| `databricks-langchain` | `>= 0.1.0` | `ChatDatabricks` (LLM), `DatabricksEmbeddings` |
+| `databricks-sql-connector` | `>= 3.0.0` | Model Serving용 Delta 연결 |
+| `pyspark` | Runtime 내장 | 노트북용 Delta 직접 쓰기 |
 
 ### 권한
 
@@ -147,16 +142,29 @@ saver = DatabricksCheckpointSaver(
 saver.setup()  # 테이블 생성 (이미 있으면 스킵 — 매 실행마다 호출 가능)
 ```
 
-### 4. Agent에 주입
+### 4. LLM 선택 — `ChatDatabricks` 권장
+
+`databricks-langchain`의 `ChatDatabricks`를 사용하면 OpenAI API 키 없이
+워크스페이스 인증만으로 Databricks Foundation Model API를 호출할 수 있습니다.
 
 ```python
-from langchain_openai import ChatOpenAI
+from databricks_langchain import ChatDatabricks
 from langgraph.prebuilt import create_react_agent
-from langchain_core.messages import HumanMessage
 
-llm = ChatOpenAI(model="gpt-4o-mini")
+# 워크스페이스 인증 자동 적용 — 외부 API 키 불필요
+llm = ChatDatabricks(endpoint="databricks-meta-llama-3-3-70b-instruct", temperature=0)
 agent = create_react_agent(llm, tools=[], checkpointer=saver)
 ```
+
+주요 Foundation Model 엔드포인트:
+
+| 엔드포인트 | 모델 |
+|------------|------|
+| `databricks-meta-llama-3-3-70b-instruct` | Llama 3.3 70B |
+| `databricks-claude-sonnet-4` | Claude Sonnet 4 |
+| `databricks-dbrx-instruct` | DBRX |
+
+> 워크스페이스 → **Serving** → **Foundation Model APIs** 에서 사용 가능한 엔드포인트를 확인하세요.
 
 ### 5. 대화 실행 — thread_id로 세션 구분
 

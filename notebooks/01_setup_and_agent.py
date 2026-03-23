@@ -13,13 +13,10 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install langgraph langchain-openai --quiet
+# MAGIC %pip install langgraph databricks-langchain --quiet
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
-
-import sys
-sys.path.insert(0, "/Workspace/Repos/<your-repo>/databricks")  # 본인 경로로 변경
 
 from pyspark.sql import SparkSession
 from checkpointers import DatabricksCheckpointSaver
@@ -42,15 +39,13 @@ print("✓ 테이블 준비 완료")
 
 # COMMAND ----------
 
-from langchain_openai import ChatOpenAI
+from databricks_langchain import ChatDatabricks
 from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import HumanMessage
-import os
 
-# Databricks Secret을 사용하거나 환경변수로 설정
-# os.environ["OPENAI_API_KEY"] = dbutils.secrets.get("my-scope", "openai-api-key")
-
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+# Databricks Foundation Model API 사용 — API 키 불필요, 워크스페이스 인증 자동 적용
+# 사용 가능한 엔드포인트: 워크스페이스 > Serving > Foundation Model APIs 에서 확인
+llm = ChatDatabricks(endpoint="databricks-meta-llama-3-3-70b-instruct", temperature=0)
 
 # 도구 예시 — 실제 사용 시 원하는 도구로 교체
 from langchain_core.tools import tool

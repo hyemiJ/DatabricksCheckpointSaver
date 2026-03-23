@@ -6,12 +6,9 @@
 
 # COMMAND ----------
 
-import sys
-sys.path.insert(0, "/Workspace/Repos/<your-repo>/databricks")
-
 from pyspark.sql import SparkSession
 from checkpointers import DatabricksCheckpointSaver
-from langchain_openai import ChatOpenAI
+from databricks_langchain import ChatDatabricks
 from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
@@ -21,7 +18,7 @@ spark = SparkSession.builder.getOrCreate()
 saver = DatabricksCheckpointSaver(spark, catalog="main", schema="langgraph")
 saver.setup()
 
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+llm = ChatDatabricks(endpoint="databricks-meta-llama-3-3-70b-instruct", temperature=0)
 
 @tool
 def get_user_info(user_id: str) -> str:
