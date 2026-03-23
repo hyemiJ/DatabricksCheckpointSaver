@@ -4,6 +4,13 @@ LangGraph의 `BaseCheckpointSaver`를 **Delta Lake** 기반으로 구현한 Data
 
 에이전트의 대화 상태(체크포인트)를 Delta 테이블에 영속 저장하므로, 노트북 재시작이나 다른 세션에서도 이전 대화가 이어집니다.
 
+**실행 환경에 따라 두 가지 세이버를 제공합니다:**
+
+| 세이버 | 환경 | 방식 |
+|--------|------|------|
+| `DatabricksCheckpointSaver` | 노트북 / Databricks Job | SparkSession + Delta 직접 쓰기 |
+| `DatabricksSQLCheckpointSaver` | **Model Serving** / 로컬 | SQL Connector (HTTP) — SparkSession 불필요 |
+
 ---
 
 ## 목차
@@ -12,6 +19,7 @@ LangGraph의 `BaseCheckpointSaver`를 **Delta Lake** 기반으로 구현한 Data
 - [폴더 구조](#폴더-구조)
 - [설치 및 요구사항](#설치-및-요구사항)
 - [빠른 시작](#빠른-시작)
+- [Model Serving 배포](#model-serving-배포)
 - [Delta 테이블 구조](#delta-테이블-구조)
 - [API 레퍼런스](#api-레퍼런스)
 - [멀티유저 패턴](#멀티유저-패턴)
@@ -41,36 +49,45 @@ LangGraph의 `BaseCheckpointSaver`를 **Delta Lake** 기반으로 구현한 Data
 DatabricksCheckpointSaver/
 │
 ├── checkpointers/
-│   ├── __init__.py                      # DatabricksCheckpointSaver export
-│   └── databricks_checkpoint_saver.py   # 핵심 구현체
+│   ├── __init__.py                          # 두 세이버 모두 export
+│   ├── databricks_checkpoint_saver.py       # Spark 기반 (노트북/Job)
+│   └── databricks_sql_checkpoint_saver.py   # SQL Connector 기반 (Model Serving)
 │
 └── notebooks/
-    ├── 01_setup_and_agent.py            # 기본 설정 및 React Agent 예제
-    └── 02_multi_user_example.py         # 멀티유저/멀티세션 패턴
+    ├── 01_setup_and_agent.py                # 기본 설정 및 React Agent 예제
+    ├── 02_multi_user_example.py             # 멀티유저/멀티세션 패턴
+    └── 03_model_serving_example.py          # Model Serving 배포 전체 흐름
 ```
 
 ### 각 파일 역할
 
 **`checkpointers/databricks_checkpoint_saver.py`**
-- `DatabricksCheckpointSaver` 클래스 정의
-- `BaseCheckpointSaver` 추상 클래스 구현 (`get_tuple`, `list`, `put`, `put_writes`)
-- 동기/비동기 인터페이스 모두 구현
+- SparkSession + Delta Lake 직접 쓰기
+- Databricks 노트북 / Job 환경에서 사용
+- `createDataFrame` + `MERGE INTO`로 SQL injection 없이 안전하게 저장
+
+**`checkpointers/databricks_sql_checkpoint_saver.py`**
+- Databricks SQL Connector(HTTP)로 SQL Warehouse에 연결
+- SparkSession 없이 동작 → **Model Serving 엔드포인트에서 사용**
+- `threading.local()`로 스레드별 커넥션 관리
+- 파라미터화된 쿼리(`%s`)로 SQL injection 방지
+- `asyncio.to_thread`로 비동기 인터페이스 제공
 
 **`notebooks/01_setup_and_agent.py`**
-- 테이블 초기화 (`setup()`)
-- React Agent 생성 및 대화 예제
-- 체크포인트 히스토리 조회 예제
+- 테이블 초기화, React Agent 생성, 대화 예제
 
 **`notebooks/02_multi_user_example.py`**
-- 여러 사용자를 `thread_id`로 분리하는 패턴
-- Delta 테이블에서 유저별 활동 집계
-- 대화 전체 복원 예제
+- `thread_id`로 사용자를 분리하는 패턴, Delta 집계 쿼리
+
+**`notebooks/03_model_serving_example.py`**
+- MLflow PythonModel로 에이전트 패키징
+- Model Serving 엔드포인트 생성 및 REST 호출 예제
 
 ---
 
 ## 설치 및 요구사항
 
-### Databricks 클러스터 / 노트북
+### 노트북 / Job 환경 (`DatabricksCheckpointSaver`)
 
 ```bash
 %pip install langgraph langchain-openai langchain-core
@@ -82,10 +99,22 @@ DatabricksCheckpointSaver/
 | `langchain-core` | `>= 0.2.0` |
 | `pyspark` | Databricks Runtime 내장 |
 
+### Model Serving 환경 (`DatabricksSQLCheckpointSaver`)
+
+```bash
+pip install langgraph langchain-openai databricks-sql-connector mlflow
+```
+
+| 패키지 | 버전 |
+|--------|------|
+| `langgraph` | `>= 0.2.0` |
+| `databricks-sql-connector` | `>= 3.0.0` |
+| `mlflow` | `>= 2.0.0` |
+
 ### 권한
 
 - Unity Catalog에서 `CREATE SCHEMA`, `CREATE TABLE` 권한 필요
-- 또는 이미 존재하는 스키마에 `CREATE TABLE` 권한
+- Model Serving 환경에서는 `DATABRICKS_HOST`, `DATABRICKS_TOKEN`이 자동 주입됩니다
 
 ---
 
@@ -95,16 +124,14 @@ DatabricksCheckpointSaver/
 
 Databricks 워크스페이스 → **Repos** → **Add Repo** → 이 레포 URL 입력
 
-### 2. 노트북에서 import
+같은 Repo 안의 노트북에서는 `sys.path` 조작 없이 바로 import 됩니다.
 
 ```python
-import sys
-sys.path.insert(0, "/Workspace/Repos/<your-username>/DatabricksCheckpointSaver")
-
+# Repos 내 노트북이면 이것만으로 충분
 from checkpointers import DatabricksCheckpointSaver
 ```
 
-### 3. 세이버 초기화 및 테이블 생성
+### 2. 세이버 초기화 및 테이블 생성
 
 ```python
 from pyspark.sql import SparkSession
@@ -222,6 +249,53 @@ saver.get_thread_history("user-001", limit=20)
 
 ---
 
+## Model Serving 배포
+
+Model Serving 환경에는 SparkSession이 없으므로 `DatabricksSQLCheckpointSaver`를 사용합니다.
+
+### 아키텍처
+
+```
+[REST 클라이언트]
+    │  POST /invocations  {"thread_id": "user-42", "messages": [...]}
+    ▼
+[Model Serving Endpoint]
+    │  DatabricksSQLCheckpointSaver
+    │  (DATABRICKS_HOST / DATABRICKS_TOKEN 자동 주입)
+    ▼
+[SQL Warehouse]  ──▶  [Delta Lake: langgraph_checkpoints]
+```
+
+### 사용법
+
+```python
+# Model Serving 엔드포인트 코드 (mlflow.pyfunc.PythonModel 내부)
+from checkpointers import DatabricksSQLCheckpointSaver
+
+class MyAgentModel(mlflow.pyfunc.PythonModel):
+    def load_context(self, context):
+        self.saver = DatabricksSQLCheckpointSaver(
+            http_path=context.model_config["sql_warehouse_http_path"],
+            # server_hostname, access_token은 env var에서 자동 로드
+        )
+        self.agent = create_react_agent(llm, tools, checkpointer=self.saver)
+
+    def predict(self, context, model_input, params=None):
+        config = {"configurable": {"thread_id": model_input["thread_id"]}}
+        result = self.agent.invoke(
+            {"messages": [HumanMessage(model_input["message"])]},
+            config=config,
+        )
+        return result["messages"][-1].content
+```
+
+> **배포 전 주의:** `setup()`으로 테이블을 미리 생성해두세요.
+> Model Serving 컨테이너에는 `CREATE TABLE` 권한이 없을 수 있습니다.
+
+전체 예제는 [`notebooks/03_model_serving_example.py`](notebooks/03_model_serving_example.py)를 참고하세요.
+
+---
+
 ## 멀티유저 패턴
 
 `thread_id`를 사용자 ID나 세션 ID로 사용하면 대화가 완전히 분리됩니다.
@@ -292,5 +366,6 @@ result = agent.invoke(
 
 - `setup()`은 매 노트북 실행 시 호출해도 안전합니다 (`CREATE TABLE IF NOT EXISTS` 사용).
 - `thread_id`는 문자열이면 무엇이든 사용 가능합니다 (UUID, 유저 이름, 세션 ID 등).
+- `DatabricksSQLCheckpointSaver`는 Model Serving 배포 **전** 노트북에서 `setup()`을 실행해 테이블을 미리 만들어두세요.
 - 비동기(`async`) 인터페이스도 구현되어 있으나, Databricks 클러스터 환경에서는 동기 방식이 권장됩니다.
 - 체크포인트 데이터는 `JsonPlusSerializer`로 직렬화됩니다. LangGraph 버전 업그레이드 시 직렬화 포맷 변경에 주의하세요.
