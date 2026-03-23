@@ -32,11 +32,13 @@
 # COMMAND ----------
 
 import os
-from databricks.sdk import WorkspaceClient
 
+ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+os.environ["DATABRICKS_HOST"] = f"https://{ctx.browserHostName().get()}"
+os.environ["DATABRICKS_TOKEN"] = ctx.apiToken().get()
+
+from databricks.sdk import WorkspaceClient
 w = WorkspaceClient()
-os.environ["DATABRICKS_HOST"] = w.config.host
-os.environ["DATABRICKS_TOKEN"] = w.config.token  # 노트북 인증 컨텍스트에서 자동 로드
 
 # COMMAND ----------
 
@@ -245,8 +247,8 @@ print(f"✓ 엔드포인트 생성 완료: {endpoint.state}")
 
 import requests
 
-ENDPOINT_URL = f"{w.config.host}/serving-endpoints/langgraph-agent-memory/invocations"
-HEADERS = {"Authorization": f"Bearer {w.config.token}", "Content-Type": "application/json"}
+ENDPOINT_URL = f"{os.environ['DATABRICKS_HOST']}/serving-endpoints/langgraph-agent-memory/invocations"
+HEADERS = {"Authorization": f"Bearer {os.environ['DATABRICKS_TOKEN']}", "Content-Type": "application/json"}
 
 
 def ask(thread_id: str, message: str) -> str:
