@@ -7,8 +7,8 @@
 # MAGIC
 # MAGIC ## 구조
 # MAGIC ```
-# MAGIC main.checkpointsaver.jhm_checkpoints       — 체크포인트 (대화 스냅샷)
-# MAGIC main.checkpointsaver.jhm_checkpoint_writes — 노드별 중간 쓰기
+# MAGIC training.checkpointsaver.jhm_checkpoints       — 체크포인트 (대화 스냅샷)
+# MAGIC training.checkpointsaver.jhm_checkpoint_writes — 노드별 중간 쓰기
 # MAGIC ```
 
 # COMMAND ----------
