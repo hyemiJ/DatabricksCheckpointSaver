@@ -100,10 +100,17 @@ class DatabricksSQLCheckpointSaver(BaseCheckpointSaver):
         super().__init__(serde=JsonPlusSerializer())
 
         self._http_path = http_path
-        self._server_hostname = _strip_scheme(
-            server_hostname or os.environ["DATABRICKS_HOST"]
-        )
-        self._access_token = access_token or os.environ.get("DATABRICKS_TOKEN")
+
+        host = server_hostname or os.getenv("DATABRICKS_HOST")
+        if not host:
+            raise ValueError(
+                "server_hostname이 지정되지 않았고 DATABRICKS_HOST 환경변수도 없습니다.\n"
+                "로컬 테스트 시: os.environ['DATABRICKS_HOST'] = 'https://adb-xxx.azuredatabricks.net'\n"
+                "Model Serving에서는 자동 주입됩니다."
+            )
+        self._server_hostname = _strip_scheme(host)
+
+        self._access_token = access_token or os.getenv("DATABRICKS_TOKEN")
 
         self.catalog = catalog
         self.schema = schema
