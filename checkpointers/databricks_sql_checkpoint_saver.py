@@ -138,6 +138,7 @@ class DatabricksSQLCheckpointSaver(BaseCheckpointSaver):
                 http_path=self._http_path,
                 access_token=self._access_token,
                 session_configuration={"ansi_mode": "false"},
+                use_inline_params=True,
             )
             self._local.conn = conn
             logger.debug("SQL connection opened (thread=%s)", threading.get_ident())

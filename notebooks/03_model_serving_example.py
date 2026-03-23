@@ -24,6 +24,30 @@
 
 # COMMAND ----------
 
+# DBTITLE 1,Configuration
+# ── 설정 변수 (환경에 맞게 변경하세요) ─────────────────────────
+
+# Databricks 인증
+DATABRICKS_PAT_TOKEN = "<your_token>"  # 변경 필요
+
+# SQL Warehouse
+SQL_WAREHOUSE_HTTP_PATH = "/sql/1.0/warehouses/<warehouse_id>"  # 변경 필요
+
+# Unity Catalog 설정
+CATALOG = "training"
+SCHEMA = "checkpointsaver"
+TABLE_PREFIX = "jhm"
+
+# 모델 / 엔드포인트
+MODEL_NAME = f"{CATALOG}.jhm.langgraph_agent_with_memory"
+LLM_ENDPOINT = "databricks-meta-llama-3-3-70b-instruct"
+ENDPOINT_NAME = "langgraph-agent-memory"
+
+# checkpointers 패키지 경로
+CHECKPOINTERS_DIR = "/Workspace/Users/.../DatabricksCheckpointSaver/checkpointers"
+
+# COMMAND ----------
+
 # MAGIC %md ## Step 1 — 테이블 미리 생성 (배포 전 한 번만)
 # MAGIC
 # MAGIC Model Serving 컨테이너에서 `CREATE TABLE` 권한이 없을 수 있으므로
@@ -32,25 +56,21 @@
 # COMMAND ----------
 
 import os
-
-ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
-os.environ["DATABRICKS_HOST"] = f"https://{ctx.browserHostName().get()}"
-os.environ["DATABRICKS_TOKEN"] = ctx.apiToken().get()
-
 from databricks.sdk import WorkspaceClient
 w = WorkspaceClient()
+
+os.environ["DATABRICKS_HOST"] = w.config.host
+os.environ["DATABRICKS_TOKEN"] = DATABRICKS_PAT_TOKEN
 
 # COMMAND ----------
 
 from checkpointers import DatabricksSQLCheckpointSaver
 
-SQL_WAREHOUSE_HTTP_PATH = "/sql/1.0/warehouses/<your-warehouse-id>"  # 변경 필요
-
 saver = DatabricksSQLCheckpointSaver(
     http_path=SQL_WAREHOUSE_HTTP_PATH,
-    catalog="training",                                             # 변경 필요
-    schema="checkpointsaver",                                       # 변경 필요
-    table_prefix="jhm"                                              # 변경 필요
+    catalog=CATALOG,
+    schema=SCHEMA,
+    table_prefix=TABLE_PREFIX,
 )
 saver.setup()
 print("✓ 테이블 생성 완료")
@@ -155,8 +175,6 @@ class LangGraphAgentModel(mlflow.pyfunc.PythonModel):
 import pandas as pd
 from mlflow.models import infer_signature
 
-
-model_name = "<catalog.schema.table_name>"
 input_example = pd.DataFrame([{
     "thread_id": "user-001",
     "messages": [{"role": "user", "content": "P001 알려줘"}],
@@ -168,13 +186,10 @@ signature = infer_signature(input_example, output_example)
 
 model_config = {
     "sql_warehouse_http_path": SQL_WAREHOUSE_HTTP_PATH,
-    "catalog": "training",
-    "schema": "checkpointsaver",
-    "llm_endpoint": "databricks-meta-llama-3-3-70b-instruct",
+    "catalog": CATALOG,
+    "schema": SCHEMA,
+    "llm_endpoint": LLM_ENDPOINT,
 }
-
-# checkpointers 패키지 경로 — Model Serving 컨테이너에 번들링
-CHECKPOINTERS_DIR = "/Workspace/Users/..../DatabricksCheckpointSaver/checkpointers" # 변경 필요
 
 with mlflow.start_run(run_name="langgraph-agent-with-memory"):
     model_info = mlflow.pyfunc.log_model(
@@ -183,14 +198,14 @@ with mlflow.start_run(run_name="langgraph-agent-with-memory"):
         model_config=model_config,
         signature=signature,
         input_example=input_example,
-        code_paths=[CHECKPOINTERS_DIR],  # 로컬 checkpointers 모듈 포함
+        code_paths=[CHECKPOINTERS_DIR],
         pip_requirements=[
             "langchain>=0.3.0",
             "langgraph>=1.0.0",
             "databricks-langchain>=0.1.0",
             "databricks-sql-connector>=3.0.0",
         ],
-        registered_model_name=model_name,
+        registered_model_name=MODEL_NAME,
     )
     print(f"✓ 모델 등록 완료: {model_info.model_uri}")
 
@@ -209,7 +224,7 @@ w = WorkspaceClient()
 
 # 기존 실패한 엔드포인트 삭제
 try:
-    w.serving_endpoints.delete("langgraph-agent-memory")
+    w.serving_endpoints.delete(ENDPOINT_NAME)
     import time; time.sleep(5)
     print("✓ 기존 엔드포인트 삭제 완료")
 except Exception:
@@ -218,17 +233,17 @@ except Exception:
 # 최신 모델 버전 조회
 from mlflow import MlflowClient
 client = MlflowClient(registry_uri="databricks-uc")
-versions = client.search_model_versions(f"name='{model_name}'")
+versions = client.search_model_versions(f"name='{MODEL_NAME}'")
 latest_version = max(v.version for v in versions)
 print(f"배포 모델 버전: {latest_version}")
 
 endpoint = w.serving_endpoints.create_and_wait(
-    name="langgraph-agent-memory",
+    name=ENDPOINT_NAME,
     config=EndpointCoreConfigInput(
-        name="langgraph-agent-memory",
+        name=ENDPOINT_NAME,
         served_models=[
             ServedModelInput(
-                model_name=model_name,
+                model_name=MODEL_NAME,
                 model_version=str(latest_version),
                 scale_to_zero_enabled=True,
                 workload_size="Small",
@@ -237,30 +252,49 @@ endpoint = w.serving_endpoints.create_and_wait(
     ),
 )
 print(f"✓ 엔드포인트 생성 완료: {endpoint.state}")
-#TimeoutError: timed out after 0:20:00: current status: EndpointStateConfigUpdate.IN_PROGRESS
 
 # COMMAND ----------
 
 # MAGIC %md ## Step 5 — 엔드포인트 호출 테스트
+# MAGIC <br>
+# MAGIC
+# MAGIC - Edit endpoint
+# MAGIC   - Advanced configuration
+# MAGIC     - Environment variables
+# MAGIC       - DATABRICKS_HOST
+# MAGIC       - DATABRICKS_TOKEN
+# MAGIC
 
 # COMMAND ----------
 
 import requests
+import json
 
-ENDPOINT_URL = f"{os.environ['DATABRICKS_HOST']}/serving-endpoints/langgraph-agent-memory/invocations"
-HEADERS = {"Authorization": f"Bearer {os.environ['DATABRICKS_TOKEN']}", "Content-Type": "application/json"}
+host = os.environ["DATABRICKS_HOST"]
+token = os.environ["DATABRICKS_TOKEN"]
 
+response = requests.post(
+    f"https://{host}/serving-endpoints/{ENDPOINT_NAME}/invocations",
+    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    json={
+        "dataframe_split": {
+            "columns": ["thread_id", "messages"],
+            "data": [["user-test-001", [{"role": "user", "content": "P001 알려줘"}]]]
+        }
+    },
+)
+print(json.dumps(response.json(), indent=2, ensure_ascii=False))
 
-def ask(thread_id: str, message: str) -> str:
-    payload = {
-        "dataframe_records": [
-            {"thread_id": thread_id, "messages": [{"role": "user", "content": message}]}
-        ]
-    }
-    res = requests.post(ENDPOINT_URL, headers=HEADERS, json=payload)
-    res.raise_for_status()
-    return res.json()["predictions"][0]["response"]
+# COMMAND ----------
 
-
-print(ask("user-001", "P001 상품 정보 알려줘"))
-print(ask("user-001", "방금 알려준 상품 가격이 얼마야?"))  # Delta에서 이전 대화 복원
+response = requests.post(
+    f"https://{host}/serving-endpoints/{ENDPOINT_NAME}/invocations",
+    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    json={
+        "dataframe_split": {
+            "columns": ["thread_id", "messages"],
+            "data": [["user-test-001", [{"role": "user", "content": "방금 내가 어떤 상품 물어봤지 ?"}]]]
+        }
+    },
+)
+print(json.dumps(response.json(), indent=2, ensure_ascii=False))
