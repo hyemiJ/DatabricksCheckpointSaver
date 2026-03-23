@@ -7,28 +7,28 @@
 # MAGIC
 # MAGIC ## 구조
 # MAGIC ```
-# MAGIC main.langgraph.langgraph_checkpoints       — 체크포인트 (대화 스냅샷)
-# MAGIC main.langgraph.langgraph_checkpoint_writes — 노드별 중간 쓰기
+# MAGIC main.checkpointsaver.jhm_checkpoints       — 체크포인트 (대화 스냅샷)
+# MAGIC main.checkpointsaver.jhm_checkpoint_writes — 노드별 중간 쓰기
 # MAGIC ```
 
 # COMMAND ----------
 
-# MAGIC %pip install langchain langgraph databricks-langchain deepagents --quiet
+# MAGIC %pip install langchain langgraph databricks-langchain deepagents databricks-sql-connector
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
 
-from pyspark.sql import SparkSession
+# from pyspark.sql import SparkSession
 from checkpointers import DatabricksCheckpointSaver
 
-spark = SparkSession.builder.getOrCreate()
+# spark = SparkSession.builder.getOrCreate()
 
 # ── 1. 세이버 초기화 ──────────────────────────────────────────────────────────
 saver = DatabricksCheckpointSaver(
     spark=spark,
-    catalog="main",       # Unity Catalog 카탈로그
-    schema="langgraph",   # 스키마 (자동 생성됨)
-    table_prefix="langgraph",
+    catalog="training",       # Unity Catalog 카탈로그
+    schema="checkpointsaver",   # 스키마 (자동 생성됨)
+    table_prefix="jhm",
 )
 saver.setup()  # 테이블 생성 (이미 있으면 스킵)
 print("✓ 테이블 준비 완료")
@@ -102,7 +102,7 @@ display(history_df)
 # COMMAND ----------
 
 # 전체 테이블 조회
-display(spark.table("main.langgraph.langgraph_checkpoints"))
+display(spark.table("training.checkpointsaver.jhm_checkpoints"))
 
 # COMMAND ----------
 
@@ -127,6 +127,8 @@ if len(checkpoints) >= 2:
     print(result["messages"][-1].content)
 
 # COMMAND ----------
+
+
 
 # COMMAND ----------
 

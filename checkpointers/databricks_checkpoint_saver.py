@@ -25,7 +25,9 @@ Quick start (Databricks notebook)
 
 from __future__ import annotations
 
+import base64
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, Iterator, Optional, Sequence, Tuple
 
@@ -142,7 +144,7 @@ class DatabricksCheckpointSaver(BaseCheckpointSaver):
                 checkpoint_ns        STRING    NOT NULL COMMENT 'Namespace (empty for root, node:uuid for subgraphs)',
                 checkpoint_id        STRING    NOT NULL COMMENT 'Unique monotonically-increasing checkpoint ID',
                 parent_checkpoint_id STRING             COMMENT 'Parent checkpoint ID (NULL for first checkpoint)',
-                type                 STRING    NOT NULL COMMENT 'Serializer type tag',
+                `type`               STRING    NOT NULL COMMENT 'Serializer type tag',
                 checkpoint           STRING    NOT NULL COMMENT 'Serialized checkpoint JSON',
                 metadata             STRING    NOT NULL COMMENT 'Serialized CheckpointMetadata JSON',
                 created_at           TIMESTAMP NOT NULL COMMENT 'Wall-clock time of this checkpoint'
@@ -163,7 +165,7 @@ class DatabricksCheckpointSaver(BaseCheckpointSaver):
                 task_id       STRING  NOT NULL COMMENT 'Graph node task ID',
                 idx           INT     NOT NULL COMMENT 'Write index within the task',
                 channel       STRING  NOT NULL COMMENT 'Channel name written to',
-                type          STRING  NOT NULL COMMENT 'Serializer type tag',
+                `type`        STRING  NOT NULL COMMENT 'Serializer type tag',
                 value         STRING           COMMENT 'Serialized channel value'
             )
             USING DELTA
@@ -184,27 +186,38 @@ class DatabricksCheckpointSaver(BaseCheckpointSaver):
     # Serialization helpers
     # -----------------------------------------------------------------------
 
+    def _merge_with_retry(self, sql: str, max_retries: int = 5) -> None:
+        """Execute a MERGE statement with retry logic for ConcurrentAppendException."""
+        for attempt in range(max_retries):
+            try:
+                self.spark.sql(sql)
+                return
+            except Exception as e:
+                if "ConcurrentAppendException" in str(e) and attempt < max_retries - 1:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise
+
     def _ser_checkpoint(self, cp: Checkpoint) -> Tuple[str, str]:
         type_, bytes_ = self.serde.dumps_typed(cp)
-        return type_, bytes_.decode()
+        return type_, base64.b64encode(bytes_).decode("ascii")
 
     def _deser_checkpoint(self, row: Row) -> Checkpoint:
-        return self.serde.loads_typed((row["type"], row["checkpoint"].encode()))
+        return self.serde.loads_typed((row["type"], base64.b64decode(row["checkpoint"])))
 
     def _ser_metadata(self, meta: CheckpointMetadata) -> str:
         _, bytes_ = self.serde.dumps_typed(meta)
-        return bytes_.decode()
+        return base64.b64encode(bytes_).decode("ascii")
 
     def _deser_metadata(self, row: Row) -> CheckpointMetadata:
-        # metadata is always JSON-serialized
-        return self.serde.loads_typed(("json", row["metadata"].encode()))
+        return self.serde.loads_typed((row["type"], base64.b64decode(row["metadata"])))
 
     def _deser_writes(self, rows: list[Row]) -> list[PendingWrite]:
         return [
             (
                 r["task_id"],
                 r["channel"],
-                self.serde.loads_typed((r["type"], r["value"].encode())),
+                self.serde.loads_typed((r["type"], base64.b64decode(r["value"]))),
             )
             for r in rows
         ]
@@ -360,18 +373,18 @@ class DatabricksCheckpointSaver(BaseCheckpointSaver):
             self.spark.createDataFrame([row], schema=_CHECKPOINTS_STRUCT)
             .createOrReplaceTempView("_cp_upsert")
         )
-        self.spark.sql(f"""
+        self._merge_with_retry(f"""
             MERGE INTO {self._cp_table} AS target
             USING _cp_upsert AS source
               ON  target.thread_id     = source.thread_id
               AND target.checkpoint_ns = source.checkpoint_ns
               AND target.checkpoint_id = source.checkpoint_id
-            WHEN NOT MATCHED THEN INSERT *
             WHEN MATCHED THEN UPDATE SET
-                type       = source.type,
+                `type`     = source.`type`,
                 checkpoint = source.checkpoint,
                 metadata   = source.metadata,
                 created_at = source.created_at
+            WHEN NOT MATCHED THEN INSERT *
         """)
 
         logger.debug("put checkpoint %s / thread=%s", checkpoint_id, thread_id)
@@ -410,7 +423,7 @@ class DatabricksCheckpointSaver(BaseCheckpointSaver):
                     idx=idx,
                     channel=channel,
                     type=type_,
-                    value=bytes_.decode(),
+                    value=base64.b64encode(bytes_).decode("ascii"),
                 )
             )
 
@@ -418,7 +431,7 @@ class DatabricksCheckpointSaver(BaseCheckpointSaver):
             self.spark.createDataFrame(rows, schema=_WRITES_STRUCT)
             .createOrReplaceTempView("_wr_upsert")
         )
-        self.spark.sql(f"""
+        self._merge_with_retry(f"""
             MERGE INTO {self._wr_table} AS target
             USING _wr_upsert AS source
               ON  target.thread_id     = source.thread_id
@@ -426,11 +439,11 @@ class DatabricksCheckpointSaver(BaseCheckpointSaver):
               AND target.checkpoint_id = source.checkpoint_id
               AND target.task_id       = source.task_id
               AND target.idx           = source.idx
-            WHEN NOT MATCHED THEN INSERT *
             WHEN MATCHED THEN UPDATE SET
                 channel = source.channel,
-                type    = source.type,
+                `type`  = source.`type`,
                 value   = source.value
+            WHEN NOT MATCHED THEN INSERT *
         """)
 
         logger.debug(
