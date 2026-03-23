@@ -9,7 +9,7 @@
 from pyspark.sql import SparkSession
 from checkpointers import DatabricksCheckpointSaver
 from databricks_langchain import ChatDatabricks
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 
@@ -26,7 +26,12 @@ def get_user_info(user_id: str) -> str:
     users = {"alice": "Alice (마케팅팀)", "bob": "Bob (개발팀)"}
     return users.get(user_id, "알 수 없는 사용자")
 
-agent = create_react_agent(llm, [get_user_info], checkpointer=saver)
+agent = create_agent(
+    model=llm,
+    tools=[get_user_info],
+    checkpointer=saver,
+    system_prompt="당신은 친절한 어시스턴트입니다.",
+)
 
 # COMMAND ----------
 

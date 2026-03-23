@@ -90,19 +90,21 @@ DatabricksCheckpointSaver/
 ### 노트북 / Job 환경 (`DatabricksCheckpointSaver`)
 
 ```bash
-%pip install langgraph databricks-langchain
+%pip install langchain langgraph databricks-langchain deepagents
 ```
 
 ### Model Serving 환경 (`DatabricksSQLCheckpointSaver`)
 
 ```bash
-pip install langgraph databricks-langchain databricks-sql-connector mlflow
+pip install langchain langgraph databricks-langchain databricks-sql-connector mlflow
 ```
 
 | 패키지 | 버전 | 용도 |
 |--------|------|------|
-| `langgraph` | `>= 0.2.0` | 그래프/에이전트 실행 |
-| `databricks-langchain` | `>= 0.1.0` | `ChatDatabricks` (LLM), `DatabricksEmbeddings` |
+| `langchain` | `>= 0.3.0` | `create_agent` (LangGraph v1 표준) |
+| `langgraph` | `>= 1.0.0` | 그래프 실행 엔진 |
+| `databricks-langchain` | `>= 0.1.0` | `ChatDatabricks`, `DatabricksEmbeddings` |
+| `deepagents` | latest | `create_deep_agent` (플래닝/서브에이전트) |
 | `databricks-sql-connector` | `>= 3.0.0` | Model Serving용 Delta 연결 |
 | `pyspark` | Runtime 내장 | 노트북용 Delta 직접 쓰기 |
 
@@ -149,11 +151,21 @@ saver.setup()  # 테이블 생성 (이미 있으면 스킵 — 매 실행마다 
 
 ```python
 from databricks_langchain import ChatDatabricks
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent   # LangGraph v1 표준 (create_react_agent 대체)
 
-# 워크스페이스 인증 자동 적용 — 외부 API 키 불필요
 llm = ChatDatabricks(endpoint="databricks-meta-llama-3-3-70b-instruct", temperature=0)
-agent = create_react_agent(llm, tools=[], checkpointer=saver)
+
+# create_agent: prompt= → system_prompt= 로 파라미터명 변경됨
+agent = create_agent(model=llm, tools=[], checkpointer=saver, system_prompt="...")
+```
+
+복잡한 다단계 작업이라면 `create_deep_agent`를 사용합니다:
+
+```python
+from deepagents import create_deep_agent
+
+# 내장 도구: write_todos, read/write/edit_file, glob, grep, task(서브에이전트)
+deep_agent = create_deep_agent(model=llm, tools=[], checkpointer=saver)
 ```
 
 주요 Foundation Model 엔드포인트:

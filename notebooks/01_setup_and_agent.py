@@ -13,7 +13,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install langgraph databricks-langchain --quiet
+# MAGIC %pip install langchain langgraph databricks-langchain deepagents --quiet
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
@@ -40,15 +40,11 @@ print("✓ 테이블 준비 완료")
 # COMMAND ----------
 
 from databricks_langchain import ChatDatabricks
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent      # LangGraph v1 — create_react_agent 대체
 from langchain_core.messages import HumanMessage
-
-# Databricks Foundation Model API 사용 — API 키 불필요, 워크스페이스 인증 자동 적용
-# 사용 가능한 엔드포인트: 워크스페이스 > Serving > Foundation Model APIs 에서 확인
-llm = ChatDatabricks(endpoint="databricks-meta-llama-3-3-70b-instruct", temperature=0)
-
-# 도구 예시 — 실제 사용 시 원하는 도구로 교체
 from langchain_core.tools import tool
+
+llm = ChatDatabricks(endpoint="databricks-meta-llama-3-3-70b-instruct", temperature=0)
 
 @tool
 def get_weather(city: str) -> str:
@@ -57,8 +53,15 @@ def get_weather(city: str) -> str:
 
 tools = [get_weather]
 
-# checkpointer에 DatabricksCheckpointSaver 주입
-agent = create_react_agent(llm, tools, checkpointer=saver)
+# create_agent: create_react_agent의 후속 API
+# - prompt= 파라미터가 system_prompt= 로 변경됨
+# - checkpointer= 는 동일하게 사용
+agent = create_agent(
+    model=llm,
+    tools=tools,
+    checkpointer=saver,
+    system_prompt="당신은 친절한 어시스턴트입니다.",
+)
 
 # COMMAND ----------
 
@@ -125,9 +128,40 @@ if len(checkpoints) >= 2:
 
 # COMMAND ----------
 
-# MAGIC %md ## 6. 스레드 삭제 (선택)
+# COMMAND ----------
+
+# MAGIC %md ## 6. create_deep_agent — 플래닝/서브에이전트가 필요한 복잡한 작업
+# MAGIC
+# MAGIC `create_deep_agent`는 `create_agent` 위에 다음을 추가로 제공합니다:
+# MAGIC - `write_todos`: 작업 계획 분해
+# MAGIC - `read_file / write_file / edit_file / glob / grep`: 내장 파일시스템 도구
+# MAGIC - `task`: 서브에이전트 위임
+# MAGIC - 자동 컨텍스트 요약
+
+# COMMAND ----------
+
+from deepagents import create_deep_agent
+
+deep_agent = create_deep_agent(
+    model=llm,
+    tools=tools,           # 커스텀 도구 추가 가능 (내장 도구와 병합됨)
+    checkpointer=saver,    # 동일한 DatabricksCheckpointSaver 사용
+    system_prompt="당신은 데이터 분석 전문 어시스턴트입니다.",
+)
+
+config = {"configurable": {"thread_id": "deep-demo-001"}}
+result = deep_agent.invoke(
+    {"messages": [HumanMessage(content="서울과 부산의 날씨를 비교해서 요약해줘")]},
+    config=config,
+)
+print(result["messages"][-1].content)
+
+# COMMAND ----------
+
+# MAGIC %md ## 7. 스레드 삭제 (선택)
 
 # COMMAND ----------
 
 # saver.delete_thread("user-demo-001")
+# saver.delete_thread("deep-demo-001")
 # print("스레드 삭제 완료")

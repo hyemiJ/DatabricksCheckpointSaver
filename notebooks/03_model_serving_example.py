@@ -19,7 +19,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install langgraph databricks-langchain databricks-sql-connector mlflow --quiet
+# MAGIC %pip install langchain langgraph databricks-langchain databricks-sql-connector mlflow --quiet
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
@@ -76,7 +76,7 @@ class LangGraphAgentModel(mlflow.pyfunc.PythonModel):
     def load_context(self, context):
         """서빙 컨테이너 시작 시 한 번 실행됩니다."""
         from databricks_langchain import ChatDatabricks
-        from langgraph.prebuilt import create_react_agent
+        from langchain.agents import create_agent  # LangGraph v1 표준 API
         from checkpointers import DatabricksSQLCheckpointSaver
 
         # SQL Connector: DATABRICKS_HOST / DATABRICKS_TOKEN 자동 주입
@@ -94,7 +94,12 @@ class LangGraphAgentModel(mlflow.pyfunc.PythonModel):
             temperature=0,
         )
 
-        self.agent = create_react_agent(llm, [get_product_info], checkpointer=self.saver)
+        self.agent = create_agent(
+            model=llm,
+            tools=[get_product_info],
+            checkpointer=self.saver,
+            system_prompt="당신은 상품 정보를 안내하는 어시스턴트입니다.",
+        )
 
     def predict(self, context, model_input, params=None):
         """
@@ -149,7 +154,8 @@ with mlflow.start_run(run_name="langgraph-agent-with-memory"):
         python_model=LangGraphAgentModel(),
         model_config=model_config,
         pip_requirements=[
-            "langgraph>=0.2.0",
+            "langchain>=0.3.0",
+            "langgraph>=1.0.0",
             "databricks-langchain>=0.1.0",
             "databricks-sql-connector>=3.0.0",
         ],
