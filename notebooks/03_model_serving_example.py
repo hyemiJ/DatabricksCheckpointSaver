@@ -19,7 +19,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install langchain langgraph databricks-langchain databricks-sql-connector mlflow --quiet
+# MAGIC %pip install langchain langgraph databricks-langchain databricks-sql-connector mlflow 
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
@@ -31,14 +31,24 @@
 
 # COMMAND ----------
 
+import os
+from databricks.sdk import WorkspaceClient
+
+w = WorkspaceClient()
+os.environ["DATABRICKS_HOST"] = w.config.host
+os.environ["DATABRICKS_TOKEN"] = "<your token>" # 변경 필요
+
+# COMMAND ----------
+
 from checkpointers import DatabricksSQLCheckpointSaver
 
 SQL_WAREHOUSE_HTTP_PATH = "/sql/1.0/warehouses/<your-warehouse-id>"  # 변경 필요
 
 saver = DatabricksSQLCheckpointSaver(
     http_path=SQL_WAREHOUSE_HTTP_PATH,
-    catalog="main",
-    schema="langgraph",
+    catalog="training",                                             # 변경 필요
+    schema="checkpointsaver",                                       # 변경 필요
+    table_prefix="jhm"                                              # 변경 필요
 )
 saver.setup()
 print("✓ 테이블 생성 완료")
@@ -76,14 +86,15 @@ class LangGraphAgentModel(mlflow.pyfunc.PythonModel):
     def load_context(self, context):
         """서빙 컨테이너 시작 시 한 번 실행됩니다."""
         from databricks_langchain import ChatDatabricks
-        from langchain.agents import create_agent  # LangGraph v1 표준 API
+        from langchain.agents import create_agent  
         from checkpointers import DatabricksSQLCheckpointSaver
 
         # SQL Connector: DATABRICKS_HOST / DATABRICKS_TOKEN 자동 주입
         self.saver = DatabricksSQLCheckpointSaver(
-            http_path=context.model_config["sql_warehouse_http_path"],
-            catalog=context.model_config.get("catalog", "main"),
-            schema=context.model_config.get("schema", "langgraph"),
+            http_path=context.model_config["sql_warehouse_http_path"],      # 변경 필요
+            catalog=context.model_config.get("catalog", "training"),        # 변경 필요
+            schema=context.model_config.get("schema", "checkpointsaver"),   # 변경 필요
+            table_prefix=context.model_config.get("table_prefix", "jhm"),   # 변경 필요
         )
 
         # ChatDatabricks: 워크스페이스 인증 자동 적용, 외부 API 키 불필요
@@ -139,27 +150,45 @@ class LangGraphAgentModel(mlflow.pyfunc.PythonModel):
 
 # COMMAND ----------
 
-mlflow.set_experiment("/Shared/langgraph-agent-experiment")
+import pandas as pd
+from mlflow.models import infer_signature
+
+
+model_name = "<catalog.schema.table_name>"
+input_example = pd.DataFrame([{
+    "thread_id": "user-001",
+    "messages": [{"role": "user", "content": "P001 알려줘"}],
+}])
+
+output_example = {"thread_id": "user-001", "response": "MacBook Pro 14인치, 가격: 2,990,000원"}
+
+signature = infer_signature(input_example, output_example)
 
 model_config = {
     "sql_warehouse_http_path": SQL_WAREHOUSE_HTTP_PATH,
-    "catalog": "main",
-    "schema": "langgraph",
+    "catalog": "training",
+    "schema": "checkpointsaver",
     "llm_endpoint": "databricks-meta-llama-3-3-70b-instruct",
 }
+
+# checkpointers 패키지 경로 — Model Serving 컨테이너에 번들링
+CHECKPOINTERS_DIR = "/Workspace/Users/..../DatabricksCheckpointSaver/checkpointers" # 변경 필요
 
 with mlflow.start_run(run_name="langgraph-agent-with-memory"):
     model_info = mlflow.pyfunc.log_model(
         artifact_path="langgraph_agent",
         python_model=LangGraphAgentModel(),
         model_config=model_config,
+        signature=signature,
+        input_example=input_example,
+        code_paths=[CHECKPOINTERS_DIR],  # 로컬 checkpointers 모듈 포함
         pip_requirements=[
             "langchain>=0.3.0",
             "langgraph>=1.0.0",
             "databricks-langchain>=0.1.0",
             "databricks-sql-connector>=3.0.0",
         ],
-        registered_model_name="langgraph_agent_with_memory",
+        registered_model_name=model_name,
     )
     print(f"✓ 모델 등록 완료: {model_info.model_uri}")
 
@@ -176,21 +205,37 @@ from databricks.sdk.service.serving import ServedModelInput, EndpointCoreConfigI
 
 w = WorkspaceClient()
 
+# 기존 실패한 엔드포인트 삭제
+try:
+    w.serving_endpoints.delete("langgraph-agent-memory")
+    import time; time.sleep(5)
+    print("✓ 기존 엔드포인트 삭제 완료")
+except Exception:
+    print("ℹ 기존 엔드포인트 없음 — 새로 생성합니다")
+
+# 최신 모델 버전 조회
+from mlflow import MlflowClient
+client = MlflowClient(registry_uri="databricks-uc")
+versions = client.search_model_versions(f"name='{model_name}'")
+latest_version = max(v.version for v in versions)
+print(f"배포 모델 버전: {latest_version}")
+
 endpoint = w.serving_endpoints.create_and_wait(
     name="langgraph-agent-memory",
     config=EndpointCoreConfigInput(
+        name="langgraph-agent-memory",
         served_models=[
             ServedModelInput(
-                model_name="langgraph_agent_with_memory",
-                model_version="1",
+                model_name=model_name,
+                model_version=str(latest_version),
                 scale_to_zero_enabled=True,
                 workload_size="Small",
-                # 외부 API 키 불필요 — ChatDatabricks가 워크스페이스 인증 자동 사용
             )
         ]
     ),
 )
 print(f"✓ 엔드포인트 생성 완료: {endpoint.state}")
+#TimeoutError: timed out after 0:20:00: current status: EndpointStateConfigUpdate.IN_PROGRESS
 
 # COMMAND ----------
 
@@ -200,8 +245,8 @@ print(f"✓ 엔드포인트 생성 완료: {endpoint.state}")
 
 import requests
 
-ENDPOINT_URL = f"{w.config.host}/serving-endpoints/langgraph-agent-memory/invocations"
-HEADERS = {"Authorization": f"Bearer {w.config.token}", "Content-Type": "application/json"}
+ENDPOINT_URL = f"https://<your-host>/serving-endpoints/langgraph-agent-memory/invocations" # 변경 필요
+HEADERS = {"Authorization": f"Bearer <your-token>", "Content-Type": "application/json"} # 변경 필요
 
 
 def ask(thread_id: str, message: str) -> str:

@@ -33,9 +33,11 @@ Usage (Model Serving endpoint)
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import os
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, Iterator, Optional, Sequence, Tuple
@@ -157,6 +159,22 @@ class DatabricksSQLCheckpointSaver(BaseCheckpointSaver):
             self._local.conn = None
 
     # -----------------------------------------------------------------------
+    # Retry helper
+    # -----------------------------------------------------------------------
+
+    def _execute_with_retry(self, cursor, sql: str, params=None, max_retries: int = 5):
+        """Execute SQL with retry for ConcurrentAppendException."""
+        for attempt in range(max_retries):
+            try:
+                cursor.execute(sql, params)
+                return
+            except Exception as e:
+                if "ConcurrentAppendException" in str(e) and attempt < max_retries - 1:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise
+
+    # -----------------------------------------------------------------------
     # Setup
     # -----------------------------------------------------------------------
 
@@ -175,7 +193,7 @@ class DatabricksSQLCheckpointSaver(BaseCheckpointSaver):
                     checkpoint_ns        STRING    NOT NULL,
                     checkpoint_id        STRING    NOT NULL,
                     parent_checkpoint_id STRING,
-                    type                 STRING    NOT NULL,
+                    `type`               STRING    NOT NULL,
                     checkpoint           STRING    NOT NULL,
                     metadata             STRING    NOT NULL,
                     created_at           TIMESTAMP NOT NULL
@@ -195,7 +213,7 @@ class DatabricksSQLCheckpointSaver(BaseCheckpointSaver):
                     task_id       STRING  NOT NULL,
                     idx           INT     NOT NULL,
                     channel       STRING  NOT NULL,
-                    type          STRING  NOT NULL,
+                    `type`        STRING  NOT NULL,
                     value         STRING
                 )
                 USING DELTA
@@ -217,24 +235,24 @@ class DatabricksSQLCheckpointSaver(BaseCheckpointSaver):
 
     def _ser_checkpoint(self, cp: Checkpoint) -> Tuple[str, str]:
         type_, bytes_ = self.serde.dumps_typed(cp)
-        return type_, bytes_.decode()
+        return type_, base64.b64encode(bytes_).decode("ascii")
 
     def _deser_checkpoint(self, type_: str, data: str) -> Checkpoint:
-        return self.serde.loads_typed((type_, data.encode()))
+        return self.serde.loads_typed((type_, base64.b64decode(data)))
 
     def _ser_metadata(self, meta: CheckpointMetadata) -> str:
         _, bytes_ = self.serde.dumps_typed(meta)
-        return bytes_.decode()
+        return base64.b64encode(bytes_).decode("ascii")
 
-    def _deser_metadata(self, data: str) -> CheckpointMetadata:
-        return self.serde.loads_typed(("json", data.encode()))
+    def _deser_metadata(self, type_: str, data: str) -> CheckpointMetadata:
+        return self.serde.loads_typed((type_, base64.b64decode(data)))
 
     def _deser_writes(self, rows) -> list[PendingWrite]:
         return [
             (
                 row["task_id"],
                 row["channel"],
-                self.serde.loads_typed((row["type"], row["value"].encode())),
+                self.serde.loads_typed((row["type"], base64.b64decode(row["value"]))),
             )
             for row in rows
         ]
@@ -264,7 +282,7 @@ class DatabricksSQLCheckpointSaver(BaseCheckpointSaver):
         }
 
     def _rows_to_dicts(self, cursor) -> list[dict]:
-        """cursor.fetchall() 결과를 컬럼명 기준 dict 리스트로 변환."""
+        """커서 결과를 컨럼명 기준 dict 리스트로 변환."""
         cols = [desc[0] for desc in cursor.description]
         return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
@@ -277,7 +295,7 @@ class DatabricksSQLCheckpointSaver(BaseCheckpointSaver):
     ) -> list[PendingWrite]:
         cursor.execute(
             f"""
-            SELECT task_id, channel, type, value
+            SELECT task_id, channel, `type`, value
             FROM {self._wr_table}
             WHERE thread_id = %s
               AND checkpoint_ns = %s
@@ -296,7 +314,7 @@ class DatabricksSQLCheckpointSaver(BaseCheckpointSaver):
         return CheckpointTuple(
             config=self._current_config(row),
             checkpoint=self._deser_checkpoint(row["type"], row["checkpoint"]),
-            metadata=self._deser_metadata(row["metadata"]),
+            metadata=self._deser_metadata(row["type"], row["metadata"]),
             parent_config=self._parent_config(row),
             pending_writes=pending_writes,
         )
@@ -365,7 +383,7 @@ class DatabricksSQLCheckpointSaver(BaseCheckpointSaver):
                 conditions.append("checkpoint_id < %s")
                 params.append(before_id)
 
-        # metadata JSON 컬럼 필터 (예: filter={"source": "loop"})
+        # metadata JSON 컨럼 필터 (예: filter={"source": "loop"})
         if filter:
             for key, value in filter.items():
                 conditions.append(f"GET_JSON_OBJECT(metadata, '$.{key}') = %s")
@@ -408,7 +426,8 @@ class DatabricksSQLCheckpointSaver(BaseCheckpointSaver):
 
         with self._cursor() as cur:
             # MERGE INTO — 같은 checkpoint_id가 두 번 쓰여도 중복 없음
-            cur.execute(
+            self._execute_with_retry(
+                cur,
                 f"""
                 MERGE INTO {self._cp_table} AS target
                 USING (
@@ -417,7 +436,7 @@ class DatabricksSQLCheckpointSaver(BaseCheckpointSaver):
                         %s AS checkpoint_ns,
                         %s AS checkpoint_id,
                         %s AS parent_checkpoint_id,
-                        %s AS type,
+                        %s AS `type`,
                         %s AS checkpoint,
                         %s AS metadata,
                         CAST(%s AS TIMESTAMP) AS created_at
@@ -425,12 +444,12 @@ class DatabricksSQLCheckpointSaver(BaseCheckpointSaver):
                 ON  target.thread_id     = source.thread_id
                 AND target.checkpoint_ns = source.checkpoint_ns
                 AND target.checkpoint_id = source.checkpoint_id
-                WHEN NOT MATCHED THEN INSERT *
                 WHEN MATCHED THEN UPDATE SET
-                    type       = source.type,
+                    `type`     = source.`type`,
                     checkpoint = source.checkpoint,
                     metadata   = source.metadata,
                     created_at = source.created_at
+                WHEN NOT MATCHED THEN INSERT *
                 """,
                 [
                     thread_id, checkpoint_ns, checkpoint_id,
@@ -466,9 +485,10 @@ class DatabricksSQLCheckpointSaver(BaseCheckpointSaver):
         with self._cursor() as cur:
             for idx, (channel, value) in enumerate(writes):
                 type_, bytes_ = self.serde.dumps_typed(value)
-                value_str = bytes_.decode()
+                value_str = base64.b64encode(bytes_).decode("ascii")
 
-                cur.execute(
+                self._execute_with_retry(
+                    cur,
                     f"""
                     MERGE INTO {self._wr_table} AS target
                     USING (
@@ -479,7 +499,7 @@ class DatabricksSQLCheckpointSaver(BaseCheckpointSaver):
                             %s AS task_id,
                             %s AS idx,
                             %s AS channel,
-                            %s AS type,
+                            %s AS `type`,
                             %s AS value
                     ) AS source
                     ON  target.thread_id     = source.thread_id
@@ -487,11 +507,11 @@ class DatabricksSQLCheckpointSaver(BaseCheckpointSaver):
                     AND target.checkpoint_id = source.checkpoint_id
                     AND target.task_id       = source.task_id
                     AND target.idx           = source.idx
-                    WHEN NOT MATCHED THEN INSERT *
                     WHEN MATCHED THEN UPDATE SET
                         channel = source.channel,
-                        type    = source.type,
+                        `type`  = source.`type`,
                         value   = source.value
+                    WHEN NOT MATCHED THEN INSERT *
                     """,
                     [
                         thread_id, checkpoint_ns, checkpoint_id,
